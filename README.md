@@ -66,3 +66,30 @@ Open your browser to `http://localhost:5180/` to test the application.
 | **Doctor** | Dr. A. Deshmukh, MD | `DOC-2026-001` or `doctor@apollo.in` | Apollo OPD Ward 3 |
 | **Patient** | Ramesh Sharma | `ML-2026-1001` | Pre-seeded patient with CBC tests |
 | **Patient** | Priya Patel | `ML-2026-1003` | Pre-seeded patient record |
+
+---
+
+## 🧪 Automated Testing & Verification
+
+MedLens has a comprehensive automated testing suite with **59 passing tests** across 7 test suites covering domain rules, UI workflows, and OCR pipelines.
+
+For detailed test architecture, mocks, and methodology, see [`TESTING.md`](./TESTING.md).
+
+### Run Test Suites
+```bash
+# Run all 59 tests in headless CI mode
+npm run test:run
+
+# Run with V8 code coverage report
+npm run test:coverage
+
+# Interactive watch mode
+npm test
+```
+
+### Test Coverage Highlights
+- **100% Deterministic & Headless**: Built on Vitest 5, React Testing Library, and jsdom.
+- **Reference Range Policy Tests**: Verifies strict non-inference rules for lab ranges (`NOT_DETERMINABLE`).
+- **Clinical Workflow Tests**: Tests verification state machine (`PENDING_VERIFICATION` ➔ `PATIENT_CONFIRMED` ➔ `DOCTOR_VERIFIED`), staff edit audit preservation, and rejection.
+- **Dual-Role Auth Tests**: Tests patient ID/phone logins, doctor credential validation, and session persistence.
+

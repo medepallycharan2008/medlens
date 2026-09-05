@@ -27,9 +27,9 @@ const KNOWN_TEST_PATTERNS: Array<{
   { regex: /\b(?:esr|erythrocyte\s*sedimentation\s*rate)\b/i, canonicalName: 'Erythrocyte Sedimentation Rate (ESR)', defaultUnit: 'mm/1st hr' },
 
   // Diabetes & Glucose
-  { regex: /\b(?:fasting\s*blood\s*sugar|fasting\s*glucose|fbs)\b/i, canonicalName: 'Fasting Blood Glucose', defaultUnit: 'mg/dL' },
-  { regex: /\b(?:post\s*prandial\s*blood\s*sugar|ppbs|post\s*prandial\s*glucose)\b/i, canonicalName: 'Post Prandial Glucose', defaultUnit: 'mg/dL' },
-  { regex: /\b(?:random\s*blood\s*sugar|rbs|random\s*glucose)\b/i, canonicalName: 'Random Blood Glucose', defaultUnit: 'mg/dL' },
+  { regex: /\b(?:fasting\s*(?:blood\s*)?(?:sugar|glucose)|fbs)\b/i, canonicalName: 'Fasting Blood Glucose', defaultUnit: 'mg/dL' },
+  { regex: /\b(?:post\s*prandial\s*(?:blood\s*)?(?:sugar|glucose)|ppbs)\b/i, canonicalName: 'Post Prandial Glucose', defaultUnit: 'mg/dL' },
+  { regex: /\b(?:random\s*(?:blood\s*)?(?:sugar|glucose)|rbs)\b/i, canonicalName: 'Random Blood Glucose', defaultUnit: 'mg/dL' },
   { regex: /\b(?:hba1c|glycated\s*hemoglobin|glycosylated\s*hb)\b/i, canonicalName: 'HbA1c (Glycated Hemoglobin)', defaultUnit: '%' },
 
   // Kidney / Renal Function
@@ -194,7 +194,7 @@ export class MedicalDocumentParser {
         if (/^(date|time|patient|doctor|dr\.|age|sex|gender|address|phone|mrn|opd|ipd)/i.test(line)) continue;
 
         // Match: Name (letters), Value (number), optional Unit, optional Reference range
-        const genericMatch = line.match(/^([A-Za-z\s\(\)/-]{3,35})\s+([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z/%μu]{1,12})?(?:\s+([0-9.<>\s-]+(?:\s*-\s*[0-9.]+)?))?/);
+        const genericMatch = line.match(/^([A-Za-z\s()/-]{3,35})\s+([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z/%μu]{1,12})?(?:\s+([0-9.<>\s-]+(?:\s*-\s*[0-9.]+)?))?/);
         if (genericMatch) {
           const testName = genericMatch[1].trim();
           const value = genericMatch[2].trim();
