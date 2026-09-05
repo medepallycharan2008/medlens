@@ -66,6 +66,7 @@ export const ReportUploadModal: React.FC<ReportUploadModalProps> = ({
 
   const handleFileSelected = (file: File) => {
     setSelectedFile(file);
+    setSelectedTemplateId('');
     const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
     setReportName(cleanName.charAt(0).toUpperCase() + cleanName.slice(1));
     setPipelineState('UPLOADED');
@@ -77,7 +78,7 @@ export const ReportUploadModal: React.FC<ReportUploadModalProps> = ({
     if (tmpl) {
       setReportName(tmpl.name);
       setReportType(tmpl.department);
-      setSelectedFile(new File(['Sample Content'], tmpl.sampleFileName, { type: 'application/pdf' }));
+      setSelectedFile(null);
       setPipelineState('UPLOADED');
     }
   };
@@ -102,7 +103,10 @@ export const ReportUploadModal: React.FC<ReportUploadModalProps> = ({
         reportId,
         reportName: reportTitle,
         file: selectedFile,
-        templateId: selectedTemplateId
+        templateId: selectedFile ? undefined : selectedTemplateId,
+        onProgress: (p) => {
+          setProcessingStage(`Processing OCR: ${p.status}`);
+        }
       });
 
       setProcessingStage('4. Evaluating values strictly against source reference intervals...');

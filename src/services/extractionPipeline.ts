@@ -133,9 +133,25 @@ Serum Calcium . . . ?8.6 mg/dL (Ref: 8.5 - 10.5) [Confidence: 0.62 - Digit smudg
   }
 ];
 
+import { MedicalDocumentParser } from './medicalDocumentParser';
+
 export class ExtractionPipelineService {
   /**
-   * Processes a document (preset template or uploaded file) through the AI extraction pipeline.
+   * Reads a File object into a base64 Data URL so the exact uploaded image is preserved for previews.
+   */
+  public static readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = (error) => reject(error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /**
+   * Processes a document through the AI extraction pipeline.
+   * If a real file is uploaded, runs Tesseract OCR and parses the actual document.
+   * If no file is uploaded, uses the selected standard hospital template.
    */
   public static async processDocument(params: {
     patientId: string;
@@ -144,38 +160,127 @@ export class ExtractionPipelineService {
     file: File | null;
     templateId?: string;
     customText?: string;
+    onProgress?: (progress: { status: string; progress: number }) => void;
   }): Promise<{
     status: ReportStatus;
     extractedData: ExtractedReportData;
     sourceDocumentPreview: string;
     rawText: string;
   }> {
-    const { patientId, reportId, reportName, file, templateId, customText } = params;
+    const { patientId, reportId, reportName, file, templateId, customText, onProgress } = params;
+    const reportDate = new Date().toISOString().split('T')[0];
 
-    // Simulate OCR processing latency (500ms - 800ms) for realistic UX
-    await new Promise(resolve => setTimeout(resolve, 600));
+    // CASE 1: USER UPLOADED A REAL FILE (IMAGE / DOCUMENT)
+    if (file) {
+      if (onProgress) onProgress({ status: 'Loading uploaded document...', progress: 0.1 });
 
-    // 1. Select extraction template or build from uploaded file
-    let chosenTemplate = PRESET_MEDICAL_TEMPLATES.find(t => t.templateId === templateId);
+      let sourceDocumentPreview = '';
+      try {
+        sourceDocumentPreview = await this.readFileAsDataUrl(file);
+      } catch (err) {
+        console.warn('Could not read file as data URL:', err);
+      }
 
-    if (!chosenTemplate) {
-      // If no template explicitly chosen, match based on file name or default to CBC
-      const name = (file?.name || reportName).toLowerCase();
-      if (name.includes('lipid') || name.includes('cholesterol')) {
-        chosenTemplate = PRESET_MEDICAL_TEMPLATES[1];
-      } else if (name.includes('no_range') || name.includes('emergency') || name.includes('spot')) {
-        chosenTemplate = PRESET_MEDICAL_TEMPLATES[2];
-      } else if (name.includes('scan') || name.includes('photo') || name.includes('blurry')) {
-        chosenTemplate = PRESET_MEDICAL_TEMPLATES[3];
-      } else {
-        chosenTemplate = PRESET_MEDICAL_TEMPLATES[0]; // Apollo CBC
+      // Run real OCR on the uploaded file
+      try {
+        if (onProgress) onProgress({ status: 'Running Optical Character Recognition (OCR)...', progress: 0.3 });
+        const parsed = await MedicalDocumentParser.parseDocumentFile(
+          file,
+          patientId,
+          reportId,
+          reportName,
+          onProgress
+        );
+
+        let results = parsed.results;
+        const rawText = customText || parsed.rawText;
+
+        // If the document had text but couldn't identify standard medical test names,
+        // extract any detected numbers with line context from the uploaded document
+        if (results.length === 0 && rawText.trim().length > 0) {
+          const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          for (const line of lines) {
+            const numMatch = line.match(/\b([0-9]+(?:\.[0-9]+)?)\b/);
+            if (numMatch && line.length < 80) {
+              const testLabel = line.replace(/[0-9.:,\-–]/g, ' ').trim() || 'Observed Parameter';
+              results.push({
+                id: `lab-${Date.now()}-${results.length}`,
+                patientId,
+                sourceReportId: reportId,
+                sourceReportName: reportName,
+                testName: testLabel.slice(0, 30),
+                value: numMatch[1],
+                unit: '',
+                referenceRange: null,
+                status: 'NOT_DETERMINABLE',
+                statusReason: 'Reference range not provided in source report.',
+                confidence: 0.70,
+                confidenceLevel: 'LOW',
+                sourceType: 'REPORT_EXTRACTED',
+                verificationStatus: 'UNVERIFIED',
+                originalExtraction: {
+                  testName: testLabel.slice(0, 30),
+                  value: numMatch[1],
+                  unit: '',
+                  referenceRange: null
+                },
+                reportDate
+              });
+              if (results.length >= 8) break;
+            }
+          }
+        }
+
+        const hasLowConfidence = results.some(r => r.confidenceLevel === 'LOW') || results.length === 0;
+        const status: ReportStatus = hasLowConfidence ? 'NEEDS_REVIEW' : 'PROCESSED';
+
+        const extractedData: ExtractedReportData = {
+          reportId,
+          laboratoryName: parsed.laboratoryName,
+          reportDate,
+          observations: [
+            `Extracted directly from uploaded file "${file.name}" via MedLens Optical OCR Engine.`,
+            results.length > 0 ? `Detected ${results.length} parameters from document.` : 'No standard tabular tests detected. Please review original document preview and add parameters manually.'
+          ],
+          results,
+          extractedAt: new Date().toISOString(),
+          rawText
+        };
+
+        return {
+          status,
+          extractedData,
+          sourceDocumentPreview: sourceDocumentPreview || this.generateGenericPreviewSvg(reportName, rawText),
+          rawText
+        };
+      } catch (ocrErr) {
+        console.warn('Real OCR encounter, creating raw document entry:', ocrErr);
+        // If OCR encounters an error, create a clean entry with the user's real file
+        const rawText = customText || `Uploaded file: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+        return {
+          status: 'NEEDS_REVIEW',
+          extractedData: {
+            reportId,
+            laboratoryName: 'Diagnostic Report',
+            reportDate,
+            observations: [`Uploaded document "${file.name}". Optical character recognition pending clinical verification.`],
+            results: [],
+            extractedAt: new Date().toISOString(),
+            rawText
+          },
+          sourceDocumentPreview: sourceDocumentPreview || this.generateGenericPreviewSvg(reportName, rawText),
+          rawText
+        };
       }
     }
 
-    const rawText = customText || chosenTemplate.rawText;
-    const reportDate = new Date().toISOString().split('T')[0];
+    // CASE 2: NO FILE UPLOADED — USER EXPLICITLY CHOSE A SAMPLE PRESET TEMPLATE
+    let chosenTemplate = PRESET_MEDICAL_TEMPLATES.find(t => t.templateId === templateId);
+    if (!chosenTemplate) {
+      chosenTemplate = PRESET_MEDICAL_TEMPLATES[0]; // Apollo CBC
+    }
 
-    // 2. Extract structured laboratory items and evaluate reference ranges
+    const rawText = customText || chosenTemplate.rawText;
     let hasLowConfidenceItem = false;
 
     const results: ExtractedLabResult[] = chosenTemplate.extractedItems.map((item, index) => {
@@ -186,10 +291,7 @@ export class ExtractionPipelineService {
 
       const confidence = item.confidence ?? 0.92;
       const confidenceLevel = confidence >= 0.8 ? 'HIGH' : 'LOW';
-
-      if (confidenceLevel === 'LOW') {
-        hasLowConfidenceItem = true;
-      }
+      if (confidenceLevel === 'LOW') hasLowConfidenceItem = true;
 
       return {
         id: `lab-${Date.now()}-${index}`,
@@ -197,10 +299,10 @@ export class ExtractionPipelineService {
         sourceReportId: reportId,
         sourceReportName: reportName,
         testName: item.testName,
-        value: item.value, // Preserved exactly
+        value: item.value,
         unit: item.unit,
-        referenceRange: item.referenceRange, // Preserved from source or null
-        status: evaluation.status, // LOW | NORMAL | HIGH | NOT_DETERMINABLE
+        referenceRange: item.referenceRange,
+        status: evaluation.status,
         statusReason: evaluation.statusReason,
         confidence,
         confidenceLevel,
@@ -216,7 +318,6 @@ export class ExtractionPipelineService {
       };
     });
 
-    // 3. Determine overall Report Status
     const overallStatus: ReportStatus = hasLowConfidenceItem ? 'NEEDS_REVIEW' : 'PROCESSED';
 
     const extractedData: ExtractedReportData = {
@@ -224,15 +325,14 @@ export class ExtractionPipelineService {
       laboratoryName: chosenTemplate.labName,
       reportDate,
       observations: [
-        `Processed via MedLens Optical Pipeline on ${new Date().toLocaleDateString('en-IN')}`,
-        hasLowConfidenceItem ? 'One or more items marked with low optical confidence. Staff verification needed.' : 'Optical extraction completed with high clarity.'
+        `Sample Template: ${chosenTemplate.name}`,
+        'Structured clinical parameters loaded from preset template.'
       ],
       results,
       extractedAt: new Date().toISOString(),
       rawText
     };
 
-    // 4. Source Document Visual Preview Data URL (Simulated laboratory sheet)
     const sourceDocumentPreview = this.generateDocumentPreviewSvg(chosenTemplate, rawText);
 
     return {
@@ -241,6 +341,23 @@ export class ExtractionPipelineService {
       sourceDocumentPreview,
       rawText
     };
+  }
+
+  private static generateGenericPreviewSvg(name: string, text: string): string {
+    const escaped = text.slice(0, 500).replace(/[<>&]/g, '');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="750" viewBox="0 0 600 750" style="background:#ffffff;font-family:sans-serif;">
+      <rect width="100%" height="100%" fill="#ffffff"/>
+      <rect x="20" y="20" width="560" height="710" fill="#fafafa" stroke="#e2e8f0" stroke-width="2" rx="6"/>
+      <text x="40" y="60" font-size="18" font-weight="bold" fill="#0f172a">${name}</text>
+      <text x="40" y="90" font-size="12" fill="#64748b">Optical Document Capture Preview</text>
+      <line x1="40" y1="105" x2="560" y2="105" stroke="#cbd5e1" stroke-width="1"/>
+      <foreignObject x="40" y="120" width="520" height="580">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:11px;font-family:monospace;white-space:pre-wrap;color:#334155;line-height:1.4;">
+          ${escaped}
+        </div>
+      </foreignObject>
+    </svg>`;
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   }
 
   /**

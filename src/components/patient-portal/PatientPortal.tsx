@@ -3,6 +3,7 @@ import type { PatientUser } from '../../types/auth';
 import type { Patient, MedicalReport, ExtractedLabResult } from '../../types/patient';
 import { PatientStorageService } from '../../services/storage';
 import { ExtractionPipelineService, PRESET_MEDICAL_TEMPLATES } from '../../services/extractionPipeline';
+import { ReferenceRangeService } from '../../services/referenceRangeService';
 import { LabStatusBadge, VerificationBadge, SourceBadge } from '../common/Badge';
 import {
   Activity,
@@ -15,7 +16,13 @@ import {
   Plus,
   ShieldCheck,
   FileSpreadsheet,
-  AlertCircle
+  AlertCircle,
+  Trash2,
+  Edit2,
+  Eye,
+  EyeOff,
+  Check,
+  X
 } from 'lucide-react';
 
 interface PatientPortalProps {
@@ -30,7 +37,7 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
   // Upload & Extraction State
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('apollo_cbc');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState<string>('');
   const [extractedReview, setExtractedReview] = useState<{
@@ -42,6 +49,19 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
     rawText?: string;
   } | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [showRawOcrText, setShowRawOcrText] = useState(false);
+
+  // Add parameter state in review
+  const [showAddParam, setShowAddParam] = useState(false);
+  const [newTestName, setNewTestName] = useState('');
+  const [newTestValue, setNewTestValue] = useState('');
+  const [newTestUnit, setNewTestUnit] = useState('');
+  const [newTestRange, setNewTestRange] = useState('');
+
+  // Editing existing parameter state in review
+  const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [editVal, setEditVal] = useState('');
+  const [editRange, setEditRange] = useState('');
 
   // Self-report edit form state
   const [showEditModal, setShowEditModal] = useState(false);
@@ -77,29 +97,24 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
   // Handle document upload and OCR processing
   const handleStartExtraction = async (fileToProcess?: File) => {
     const file = fileToProcess || selectedFile;
-    const template = PRESET_MEDICAL_TEMPLATES.find(t => t.templateId === selectedTemplateId);
+    const template = !file && selectedTemplateId ? PRESET_MEDICAL_TEMPLATES.find(t => t.templateId === selectedTemplateId) : undefined;
     const reportName = file ? file.name : (template?.sampleFileName || 'Medical_Lab_Report.pdf');
 
     setIsProcessing(true);
-    setProcessingStep('Uploading document to secure hospital server...');
+    setProcessingStep(file ? 'Ingesting document image into OCR pipeline...' : 'Loading sample clinical report...');
     setSuccessMessage(null);
 
     try {
-      await new Promise(r => setTimeout(r, 400));
-      setProcessingStep('Performing Optical Character Recognition (OCR)...');
-      await new Promise(r => setTimeout(r, 500));
-      setProcessingStep('Extracting medical values and reference ranges...');
-
       const result = await ExtractionPipelineService.processDocument({
         patientId: patient.id,
         reportId: `rep-${Date.now()}`,
         reportName,
         file: file || null,
-        templateId: selectedTemplateId
+        templateId: file ? undefined : selectedTemplateId,
+        onProgress: (p) => {
+          setProcessingStep(p.status);
+        }
       });
-
-      setProcessingStep('Validating source document reference ranges...');
-      await new Promise(r => setTimeout(r, 400));
 
       // Present the extracted data for Patient Review
       setExtractedReview({
@@ -116,6 +131,89 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
       setIsProcessing(false);
       setProcessingStep('');
     }
+  };
+
+  // Add parameter manually in the review screen
+  const handleAddParamToReview = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!extractedReview || !newTestName.trim() || !newTestValue.trim()) return;
+
+    const evaluation = ReferenceRangeService.evaluateValueAgainstSourceRange(
+      newTestValue.trim(),
+      newTestRange.trim() || null
+    );
+
+    const newItem: ExtractedLabResult = {
+      id: `lab-${Date.now()}-${extractedReview.results.length}`,
+      patientId: patient.id,
+      sourceReportId: `rep-${Date.now()}`,
+      sourceReportName: extractedReview.reportName,
+      testName: newTestName.trim(),
+      value: newTestValue.trim(),
+      unit: newTestUnit.trim(),
+      referenceRange: newTestRange.trim() || null,
+      status: evaluation.status,
+      statusReason: evaluation.statusReason,
+      confidence: 1.0,
+      confidenceLevel: 'HIGH',
+      sourceType: 'REPORT_EXTRACTED',
+      verificationStatus: 'PATIENT_CONFIRMED',
+      originalExtraction: {
+        testName: newTestName.trim(),
+        value: newTestValue.trim(),
+        unit: newTestUnit.trim(),
+        referenceRange: newTestRange.trim() || null
+      },
+      reportDate: new Date().toISOString().split('T')[0]
+    };
+
+    setExtractedReview({
+      ...extractedReview,
+      results: [...extractedReview.results, newItem]
+    });
+
+    setNewTestName('');
+    setNewTestValue('');
+    setNewTestUnit('');
+    setNewTestRange('');
+    setShowAddParam(false);
+  };
+
+  // Remove parameter from review
+  const handleRemoveReviewItem = (idToRemove: string) => {
+    if (!extractedReview) return;
+    setExtractedReview({
+      ...extractedReview,
+      results: extractedReview.results.filter(r => r.id !== idToRemove)
+    });
+  };
+
+  // Save inline edit in review
+  const handleSaveEditReviewItem = (idToSave: string) => {
+    if (!extractedReview) return;
+    const updated = extractedReview.results.map(r => {
+      if (r.id === idToSave) {
+        const evaluation = ReferenceRangeService.evaluateValueAgainstSourceRange(
+          editVal.trim(),
+          editRange.trim() || null
+        );
+        return {
+          ...r,
+          value: editVal.trim(),
+          referenceRange: editRange.trim() || null,
+          status: evaluation.status,
+          statusReason: evaluation.statusReason,
+          verificationStatus: 'PATIENT_CONFIRMED' as const
+        };
+      }
+      return r;
+    });
+
+    setExtractedReview({
+      ...extractedReview,
+      results: updated
+    });
+    setEditingResultId(null);
   };
 
   // Patient confirms extracted information
@@ -152,6 +250,7 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
 
     setExtractedReview(null);
     setSelectedFile(null);
+    setSelectedTemplateId('');
     setSuccessMessage('Medical report and extracted lab results have been confirmed and saved to your health record. Your consulting doctor can now view them.');
     reloadPatient();
     setActiveTab('reports');
@@ -559,37 +658,73 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                 Upload Medical Report
               </h2>
               <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                Upload laboratory test documents (PDF, JPG, JPEG, PNG). The system will extract your test parameters for your doctor.
+                Upload laboratory test documents (PDF, JPG, JPEG, PNG). The system will extract your test parameters using Optical Character Recognition (OCR).
               </p>
             </div>
 
             {/* If extraction review is active, show the confirmation screen */}
             {extractedReview ? (
               <div className="card" style={{ padding: '28px', border: '2px solid var(--primary-border)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                  <div
-                    style={{
-                      width: '40px',
-                      height: '40px',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'var(--primary-light)',
-                      color: 'var(--primary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
-                  >
-                    <CheckCircle2 size={24} />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div
+                      style={{
+                        width: '40px',
+                        height: '40px',
+                        borderRadius: 'var(--radius-md)',
+                        backgroundColor: 'var(--primary-light)',
+                        color: 'var(--primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <CheckCircle2 size={24} />
+                    </div>
+                    <div>
+                      <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                        Review Extracted Information
+                      </h3>
+                      <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                        Extracted from: <strong>{extractedReview.reportName}</strong> &bull; Size: {extractedReview.fileSize}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                      Review Extracted Information
-                    </h3>
-                    <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                      We extracted the following test values from <strong>{extractedReview.reportName}</strong>. Please review and confirm before submitting.
-                    </p>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setShowRawOcrText(!showRawOcrText)}
+                      title="Inspect optical text recognized by OCR"
+                    >
+                      {showRawOcrText ? <EyeOff size={14} /> : <Eye size={14} />}
+                      <span>{showRawOcrText ? 'Hide Raw OCR Text' : 'View Raw OCR Text'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setShowAddParam(true)}
+                      id="btn-add-param-review"
+                    >
+                      <Plus size={14} />
+                      <span>+ Add Parameter</span>
+                    </button>
                   </div>
                 </div>
+
+                {/* Raw OCR Text Box if toggled */}
+                {showRawOcrText && (
+                  <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f8fafc', border: '1px solid var(--border-medium)', borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Optical Text Recognized from Your File:
+                    </div>
+                    <pre style={{ margin: 0, fontSize: '0.8125rem', fontFamily: 'monospace', maxHeight: '160px', overflowY: 'auto', whiteSpace: 'pre-wrap', color: 'var(--text-main)' }}>
+                      {extractedReview.rawText || 'No text recognized by OCR.'}
+                    </pre>
+                  </div>
+                )}
 
                 {/* Important source range notice */}
                 <div
@@ -608,46 +743,191 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                 >
                   <AlertCircle size={18} color="var(--primary)" />
                   <div>
-                    <strong>Strict Medical Source Policy:</strong> MedLens only displays reference ranges printed directly on your uploaded report. It does not invent or assume reference ranges.
+                    <strong>Strict Source Reference Range Policy:</strong> Only ranges printed on your original report are displayed. If a range was omitted in the document, it is marked <em>Not Determinable</em>.
                   </div>
                 </div>
 
-                {/* Extracted Lab Items Table */}
-                <div style={{ overflowX: 'auto', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', marginBottom: '20px' }}>
-                  <table className="table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ backgroundColor: 'var(--surface-sunken)', textAlign: 'left', fontSize: '0.8125rem' }}>
-                        <th style={{ padding: '10px 14px' }}>Test Parameter</th>
-                        <th style={{ padding: '10px 14px' }}>Extracted Value</th>
-                        <th style={{ padding: '10px 14px' }}>Reference Range (Source Report)</th>
-                        <th style={{ padding: '10px 14px' }}>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {extractedReview.results.map((r, idx) => (
-                        <tr key={idx} style={{ borderTop: '1px solid var(--border-light)', fontSize: '0.875rem' }}>
-                          <td style={{ padding: '10px 14px', fontWeight: 600, color: 'var(--text-main)' }}>
-                            {r.testName}
-                          </td>
-                          <td style={{ padding: '10px 14px', fontFamily: 'monospace' }}>
-                            {r.value} {r.unit}
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            {r.referenceRange ? (
-                              <span>{r.referenceRange} {r.unit}</span>
-                            ) : (
-                              <span style={{ color: 'var(--text-light)', fontStyle: 'italic' }}>
-                                Reference range not provided in source report
-                              </span>
-                            )}
-                          </td>
-                          <td style={{ padding: '10px 14px' }}>
-                            <LabStatusBadge status={r.status} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                {/* Two-Column Review Layout: Document Preview + Extracted Table */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 360px) 1fr', gap: '20px', marginBottom: '20px' }}>
+                  {/* Left Column: Uploaded Document Visual Preview */}
+                  <div style={{ border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', padding: '12px', backgroundColor: '#f8fafc', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+                      Uploaded Document Preview
+                    </div>
+                    <div style={{ flex: 1, minHeight: '260px', maxHeight: '420px', overflowY: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#ffffff', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-light)' }}>
+                      {extractedReview.sourcePreview ? (
+                        <img
+                          src={extractedReview.sourcePreview}
+                          alt="Uploaded report scan preview"
+                          style={{ width: '100%', height: 'auto', display: 'block', objectFit: 'contain' }}
+                        />
+                      ) : (
+                        <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-subtle)' }}>
+                          <FileText size={32} style={{ margin: '0 auto 8px', opacity: 0.5 }} />
+                          <p style={{ fontSize: '0.8125rem' }}>No visual document preview available</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right Column: Extracted Lab Items Table */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {/* Inline Add Parameter Form */}
+                    {showAddParam && (
+                      <form onSubmit={handleAddParamToReview} style={{ padding: '12px', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.875rem', color: '#166534' }}>
+                          Add Test Parameter from Document
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1.5fr', gap: '8px' }}>
+                          <input
+                            className="form-control"
+                            placeholder="Test Name (e.g. Hemoglobin)"
+                            value={newTestName}
+                            onChange={e => setNewTestName(e.target.value)}
+                            required
+                          />
+                          <input
+                            className="form-control"
+                            placeholder="Value"
+                            value={newTestValue}
+                            onChange={e => setNewTestValue(e.target.value)}
+                            required
+                          />
+                          <input
+                            className="form-control"
+                            placeholder="Unit (e.g. g/dL)"
+                            value={newTestUnit}
+                            onChange={e => setNewTestUnit(e.target.value)}
+                          />
+                          <input
+                            className="form-control"
+                            placeholder="Source Range (e.g. 13-17)"
+                            value={newTestRange}
+                            onChange={e => setNewTestRange(e.target.value)}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowAddParam(false)}>Cancel</button>
+                          <button type="submit" className="btn btn-primary btn-sm">Add to Review</button>
+                        </div>
+                      </form>
+                    )}
+
+                    <div style={{ overflowX: 'auto', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)' }}>
+                      <table className="table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ backgroundColor: 'var(--surface-sunken)', textAlign: 'left', fontSize: '0.8125rem' }}>
+                            <th style={{ padding: '10px 12px' }}>Test Parameter</th>
+                            <th style={{ padding: '10px 12px' }}>Value</th>
+                            <th style={{ padding: '10px 12px' }}>Reference Range (Source)</th>
+                            <th style={{ padding: '10px 12px' }}>Status</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right' }}>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {extractedReview.results.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: 'var(--text-subtle)' }}>
+                                No standard parameters auto-detected from this scan. Click <strong>+ Add Parameter</strong> to enter values from your preview.
+                              </td>
+                            </tr>
+                          ) : (
+                            extractedReview.results.map((r) => {
+                              const isEditing = editingResultId === r.id;
+                              return (
+                                <tr key={r.id} style={{ borderTop: '1px solid var(--border-light)', fontSize: '0.875rem' }}>
+                                  <td style={{ padding: '10px 12px', fontWeight: 600, color: 'var(--text-main)' }}>
+                                    {r.testName}
+                                  </td>
+                                  <td style={{ padding: '10px 12px', fontFamily: 'monospace' }}>
+                                    {isEditing ? (
+                                      <input
+                                        className="form-control"
+                                        style={{ width: '80px', padding: '2px 6px', fontSize: '0.8125rem' }}
+                                        value={editVal}
+                                        onChange={e => setEditVal(e.target.value)}
+                                      />
+                                    ) : (
+                                      <span>{r.value} {r.unit}</span>
+                                    )}
+                                  </td>
+                                  <td style={{ padding: '10px 12px' }}>
+                                    {isEditing ? (
+                                      <input
+                                        className="form-control"
+                                        style={{ width: '110px', padding: '2px 6px', fontSize: '0.8125rem' }}
+                                        value={editRange}
+                                        onChange={e => setEditRange(e.target.value)}
+                                        placeholder="e.g. 13 - 17"
+                                      />
+                                    ) : r.referenceRange ? (
+                                      <span>{r.referenceRange} {r.unit}</span>
+                                    ) : (
+                                      <span style={{ color: 'var(--text-light)', fontStyle: 'italic', fontSize: '0.75rem' }}>
+                                        Not provided in source report
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td style={{ padding: '10px 12px' }}>
+                                    <LabStatusBadge status={r.status} />
+                                  </td>
+                                  <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                                    {isEditing ? (
+                                      <div style={{ display: 'inline-flex', gap: '4px' }}>
+                                        <button
+                                          type="button"
+                                          className="btn btn-primary btn-sm"
+                                          style={{ padding: '2px 6px' }}
+                                          onClick={() => handleSaveEditReviewItem(r.id)}
+                                          title="Save edit"
+                                        >
+                                          <Check size={13} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-secondary btn-sm"
+                                          style={{ padding: '2px 6px' }}
+                                          onClick={() => setEditingResultId(null)}
+                                          title="Cancel"
+                                        >
+                                          <X size={13} />
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div style={{ display: 'inline-flex', gap: '4px' }}>
+                                        <button
+                                          type="button"
+                                          className="btn btn-secondary btn-sm"
+                                          style={{ padding: '2px 6px' }}
+                                          onClick={() => {
+                                            setEditingResultId(r.id);
+                                            setEditVal(r.value);
+                                            setEditRange(r.referenceRange || '');
+                                          }}
+                                          title="Edit test value or range"
+                                        >
+                                          <Edit2 size={12} />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-danger btn-sm"
+                                          style={{ padding: '2px 6px' }}
+                                          onClick={() => handleRemoveReviewItem(r.id)}
+                                          title="Remove parameter"
+                                        >
+                                          <Trash2 size={12} />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
@@ -686,12 +966,13 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                     setDragActive(false);
                     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
                       setSelectedFile(e.dataTransfer.files[0]);
+                      setSelectedTemplateId(''); // Clear template so real OCR runs on this file!
                     }
                   }}
                   style={{
                     border: `2px dashed ${dragActive ? 'var(--primary)' : 'var(--border-medium)'}`,
                     borderRadius: 'var(--radius-lg)',
-                    padding: '40px 24px',
+                    padding: '36px 24px',
                     textAlign: 'center',
                     backgroundColor: dragActive ? 'var(--primary-light)' : 'var(--bg-card)',
                     display: 'flex',
@@ -733,6 +1014,7 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                     onChange={(e) => {
                       if (e.target.files && e.target.files[0]) {
                         setSelectedFile(e.target.files[0]);
+                        setSelectedTemplateId(''); // Clear template so real OCR runs on this file!
                       }
                     }}
                   />
@@ -750,29 +1032,47 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                     <div
                       style={{
                         marginTop: '10px',
-                        padding: '8px 14px',
-                        backgroundColor: 'var(--surface-sunken)',
-                        borderRadius: 'var(--radius-sm)',
+                        padding: '10px 16px',
+                        backgroundColor: '#ecfdf5',
+                        border: '1px solid #a7f3d0',
+                        borderRadius: 'var(--radius-md)',
                         fontSize: '0.875rem',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '8px'
+                        justifyContent: 'space-between',
+                        width: '100%',
+                        maxWidth: '500px'
                       }}
                     >
-                      <FileText size={16} color="var(--primary)" />
-                      <span>{selectedFile.name} ({(selectedFile.size / 1024).toFixed(1)} KB)</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', textAlign: 'left' }}>
+                        <FileText size={18} color="#059669" />
+                        <div>
+                          <strong style={{ color: 'var(--text-main)' }}>{selectedFile.name}</strong>
+                          <div style={{ fontSize: '0.75rem', color: '#065f46' }}>
+                            {(selectedFile.size / 1024).toFixed(1)} KB &bull; Real Optical OCR will process this file
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '2px 8px', fontSize: '0.75rem' }}
+                        onClick={() => setSelectedFile(null)}
+                      >
+                        Remove
+                      </button>
                     </div>
                   )}
                 </div>
 
-                {/* Preset Templates for Easy Clinical Testing */}
-                <div className="card" style={{ padding: '20px' }}>
+                {/* Preset Templates for Easy Clinical Testing (Only if no file is selected) */}
+                <div className="card" style={{ padding: '20px', opacity: selectedFile ? 0.6 : 1 }}>
                   <div style={{ marginBottom: '14px' }}>
                     <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
-                      Or Choose a Standard Hospital Report Sample
+                      Or Test with a Standard Hospital Report Sample
                     </h3>
                     <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
-                      Test the OCR pipeline and source reference range rules with standard Indian lab templates.
+                      {selectedFile ? 'You have selected a custom document. Deselect it above to use sample templates.' : 'Choose a standard Indian lab template to test reference range rules without uploading a file.'}
                     </p>
                   </div>
 
@@ -780,12 +1080,15 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                     {PRESET_MEDICAL_TEMPLATES.map(tmpl => (
                       <div
                         key={tmpl.templateId}
-                        onClick={() => setSelectedTemplateId(tmpl.templateId)}
+                        onClick={() => {
+                          setSelectedTemplateId(tmpl.templateId);
+                          setSelectedFile(null); // Clear custom file when user picks sample template
+                        }}
                         style={{
                           padding: '12px',
                           borderRadius: 'var(--radius-md)',
-                          border: `1px solid ${selectedTemplateId === tmpl.templateId ? 'var(--primary)' : 'var(--border-light)'}`,
-                          backgroundColor: selectedTemplateId === tmpl.templateId ? 'var(--primary-light)' : 'transparent',
+                          border: `1px solid ${selectedTemplateId === tmpl.templateId && !selectedFile ? 'var(--primary)' : 'var(--border-light)'}`,
+                          backgroundColor: selectedTemplateId === tmpl.templateId && !selectedFile ? 'var(--primary-light)' : 'transparent',
                           cursor: 'pointer',
                           display: 'flex',
                           flexDirection: 'column',
@@ -820,7 +1123,7 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                   <button
                     type="button"
                     className="btn btn-primary"
-                    disabled={isProcessing}
+                    disabled={isProcessing || (!selectedFile && !selectedTemplateId)}
                     onClick={() => handleStartExtraction()}
                     style={{ padding: '10px 24px', fontSize: '0.9375rem', gap: '8px' }}
                     id="btn-process-upload-report"
@@ -833,7 +1136,7 @@ export const PatientPortal: React.FC<PatientPortalProps> = ({ currentUser, onLog
                     ) : (
                       <>
                         <UploadCloud size={18} />
-                        <span>Extract & Review Report</span>
+                        <span>{selectedFile ? 'Run OCR & Extract Report' : 'Extract Sample Report'}</span>
                       </>
                     )}
                   </button>
